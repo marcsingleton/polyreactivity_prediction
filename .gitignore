@@ -1,0 +1,5 @@
+/.envs
+/.ipynb_checkpoints
+/.vscode
+/notebooks
+/data/processed/
