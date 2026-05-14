@@ -4,7 +4,7 @@ set -eu
 
 high_poly_path="data/processed/fastas/high.fa"
 low_poly_path="data/processed/fastas/low.fa"
-output_dir="data/processed/clustered/"
+output_dir="data/processed/clusters/"
 
 cluster_params="\
 -c 0.8 \
