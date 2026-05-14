@@ -32,16 +32,7 @@ def group_split(groups, test_ratio, val_ratio, seed=42):
     return split_sets
 
 
-high_poly_path = Path('data/raw/high_polyreactivity_high_throughput.csv')
-low_poly_path = Path('data/raw/low_polyreactivity_high_throughput.csv')
-cluster_path = Path('data/processed/clustered/clusters_85.tsv')
-output_dir = Path('data/processed/splits')
-
-seed = 42
-test_ratio = 0.1
-val_ratio = 0.1
-
-if __name__ == '__main__':
+def make_splits(cluster_path, output_dir):
     # Make splits
     with open(cluster_path) as file:
         records = map(lambda x: x.rstrip('\n').split('\t'), file.readlines())
@@ -81,3 +72,23 @@ if __name__ == '__main__':
 
     val_poly = all_poly.loc[val_split]
     val_poly.to_csv(output_dir / 'val.csv')
+
+    # Print stats to logdsf
+    print(f'{cluster_path.stem}')
+    print(f'    train: {len(train_poly)} ({len(train_poly) / len(all_poly):.2%})')
+    print(f'    test: {len(test_poly)} ({len(test_poly) / len(all_poly):.2%})')
+    print(f'    train: {len(val_poly)} ({len(val_poly) / len(all_poly):.2%})')
+
+
+high_poly_path = Path('data/raw/high_polyreactivity_high_throughput.csv')
+low_poly_path = Path('data/raw/low_polyreactivity_high_throughput.csv')
+cluster_dir = Path('data/processed/clusters/')
+output_dir = Path('data/processed/splits')
+
+seed = 42
+test_ratio = 0.1
+val_ratio = 0.1
+
+if __name__ == '__main__':
+    for cluster_path in sorted(cluster_dir.glob('*.tsv')):
+        make_splits(cluster_path, output_dir / cluster_path.stem)
