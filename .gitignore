@@ -1,5 +1,10 @@
+# dirs
 /.envs
 /.ipynb_checkpoints
 /.vscode
+/mlruns
 /notebooks
-/data/processed/
+/data/processed
+
+# files
+/mlflow.db
