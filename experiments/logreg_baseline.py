@@ -25,8 +25,9 @@ alphabet = [
 ]
 # fmt: on
 
-train_path = Path('data/processed/splits/train.csv')
-val_path = Path('data/processed/splits/val.csv')
+cluster_name = 'clusters_85'
+train_path = Path(f'data/processed/splits/{cluster_name}/train.csv')
+val_path = Path(f'data/processed/splits/{cluster_name}/val.csv')
 
 # fmt: off
 # These are taken from those used in the original publication:
@@ -59,11 +60,12 @@ if __name__ == '__main__':
 
     mlflow.set_experiment(experiment_name)
     with mlflow.start_run():
+        mlflow.log_params({'C': C, 'max_iter': max_iter})
+        mlflow.set_tag('cluster_name', cluster_name)
+
         model = sklearn.linear_model.LogisticRegression(C=C, max_iter=max_iter)
         model = model.fit(X_train, y_train)
 
-        mlflow.log_param('C', C)
-        mlflow.log_param('max_iter', max_iter)
         mlflow.sklearn.log_model(model, name=model_name, serialization_format='skops')
 
         for split_name, X, y_true in [('train', X_train, y_train), ('val', X_val, y_val)]:
