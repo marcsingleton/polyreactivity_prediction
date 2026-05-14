@@ -2,9 +2,10 @@
 /.envs
 /.ipynb_checkpoints
 /.vscode
+/data/processed
+/logs
 /mlruns
 /notebooks
-/data/processed
 
 # files
 /mlflow.db
