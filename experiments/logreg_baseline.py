@@ -15,6 +15,36 @@ def load_data(path, cols=None):
     return X, y
 
 
+def execute_child_run(C, child_name):
+    with mlflow.start_run(run_name=child_name, nested=True):
+        mlflow.log_param('C', C)
+
+        model = sklearn.linear_model.LogisticRegression(C=C, max_iter=max_iter)
+        model = model.fit(X_train, y_train)
+
+        mlflow.sklearn.log_model(model, serialization_format='skops')
+
+        for split_name, X, y_true in [('train', X_train, y_train), ('val', X_val, y_val)]:
+            y_pred = model.predict(X)
+            y_score = model.predict_proba(X)[:, 1]  # Slice class 1 probability
+
+            acc = metrics.accuracy_score(y_true, y_pred)
+            mlflow.log_metric(f'acc_{split_name}', acc)
+
+            recall = metrics.recall_score(y_true, y_pred)
+            mlflow.log_metric(f'recall_{split_name}', recall)
+
+            precision = metrics.precision_score(y_true, y_pred)
+            mlflow.log_metric(f'precision_{split_name}', precision)
+
+            roc_auc = metrics.roc_auc_score(y_true, y_score)
+            mlflow.log_metric(f'roc_auc_{split_name}', roc_auc)
+
+            precision, recall, _ = metrics.precision_recall_curve(y_true, y_score)
+            pr_auc = metrics.auc(recall, precision)
+            mlflow.log_metric(f'pr_auc_{split_name}', pr_auc)
+
+
 # fmt: off
 alphabet = [
     'A', 'C', 'D', 'E', 'F',
@@ -43,9 +73,9 @@ cols = [
 ]
 # fmt: on
 
-experiment_name = 'logreg_baseline'
-model_name = 'logreg_baseline'
-C = 1.0  # Regularization strength
+experiment_name = 'logistic_regression'
+run_name = 'initial_baseline'
+Cs = [0.1, 1.0, 10.0, 25.0, 50.0, 75.0, 100.0]
 max_iter = 1000
 
 if __name__ == '__main__':
@@ -59,31 +89,8 @@ if __name__ == '__main__':
     X_val = encoder.transform(X_val)
 
     mlflow.set_experiment(experiment_name)
-    with mlflow.start_run():
-        mlflow.log_params({'C': C, 'max_iter': max_iter})
+    with mlflow.start_run(run_name=run_name):
         mlflow.set_tag('cluster_name', cluster_name)
-
-        model = sklearn.linear_model.LogisticRegression(C=C, max_iter=max_iter)
-        model = model.fit(X_train, y_train)
-
-        mlflow.sklearn.log_model(model, name=model_name, serialization_format='skops')
-
-        for split_name, X, y_true in [('train', X_train, y_train), ('val', X_val, y_val)]:
-            y_pred = model.predict(X)
-            y_score = model.predict_proba(X)[:, 1]  # Slice class 1 probability
-
-            acc = metrics.accuracy_score(y_true, y_pred)
-            mlflow.log_metric(f'acc_{split_name}', acc)
-
-            recall = metrics.recall_score(y_true, y_pred)
-            mlflow.log_metric(f'recall_{split_name}', recall)
-
-            precision = metrics.precision_score(y_true, y_pred)
-            mlflow.log_metric(f'precision_{split_name}', precision)
-
-            roc_auc = metrics.roc_auc_score(y_true, y_score)
-            mlflow.log_metric(f'roc_auc_{split_name}', roc_auc)
-
-            precision, recall, _ = metrics.precision_recall_curve(y_true, y_score)
-            pr_auc = metrics.auc(recall, precision)
-            mlflow.log_metric(f'pr_auc_{split_name}', pr_auc)
+        for i, C in enumerate(Cs):
+            child_name = f'{run_name}_{i:02}'
+            execute_child_run(C, child_name)
