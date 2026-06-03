@@ -5,7 +5,6 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
 import esm
@@ -54,11 +53,10 @@ class ClassifierHead(nn.Module):
     def __init__(self, embedding_dim):
         super().__init__()
         self.embedding_dim = embedding_dim
-        self.fc = nn.Linear(embedding_dim, 1)
+        self.fc = nn.Linear(embedding_dim, 2)
 
     def forward(self, x):
         x = self.fc(x)
-        x = F.sigmoid(x)
         return x
 
 
@@ -107,12 +105,27 @@ seq_cols = [
     '126', '127', '128',
 ]
 # fmt: on
-batch_size = 5
+batch_size = 64
+epoch_num = 1
 
 if __name__ == '__main__':
     esm2_trunk, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
 
     model = ESM2Classifier(esm2_trunk)
+    model.train()
+    for param in model.esm2_trunk.parameters():
+        param.requires_grad = False
+
+    if torch.accelerator.is_available():
+        device = torch.accelerator.current_accelerator()
+    else:
+        device = torch.device('cpu')
+    
+    model = model.to(device)
+
+    optimizer = torch.optim.Adam(model.parameters())
+
+    loss_fn = torch.nn.CrossEntropyLoss()
 
     batch_converter = alphabet.get_batch_converter()
     collate_fn = partial(esm_collate_generator, esm_batch_converter=batch_converter)
@@ -122,6 +135,14 @@ if __name__ == '__main__':
         train_data, batch_size=batch_size, shuffle=True, collate_fn=collate_fn
     )
 
-    it = iter(train_dataloader)
-    tokens, labels = next(it)
-    pred = model(tokens)
+    for epoch_idx in range(epoch_num):
+        for tokens, labels in train_dataloader:
+            tokens = tokens.to(device)
+            labels = labels.to(device, dtype=torch.long)
+            pred = model(tokens)
+
+            loss = loss_fn(pred, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
