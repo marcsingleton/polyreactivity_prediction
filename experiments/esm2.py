@@ -5,6 +5,8 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torchmetrics
+import tqdm
 from torch.utils.data import Dataset, DataLoader
 
 import esm
@@ -53,10 +55,11 @@ class ClassifierHead(nn.Module):
     def __init__(self, embedding_dim):
         super().__init__()
         self.embedding_dim = embedding_dim
-        self.fc = nn.Linear(embedding_dim, 2)
+        self.fc = nn.Linear(embedding_dim, 1)
 
     def forward(self, x):
         x = self.fc(x)
+        x = torch.sigmoid(x)
         return x
 
 
@@ -105,14 +108,17 @@ seq_cols = [
     '126', '127', '128',
 ]
 # fmt: on
-batch_size = 64
-epoch_num = 1
+
+experiment_name = 'esm2_finetune_head'
+run_name = 'initial_test'
+batch_size = 128
+epoch_num = 100
+log_interval = 10
 
 if __name__ == '__main__':
     esm2_trunk, alphabet = esm.pretrained.esm2_t33_650M_UR50D()
 
     model = ESM2Classifier(esm2_trunk)
-    model.train()
     for param in model.esm2_trunk.parameters():
         param.requires_grad = False
 
@@ -120,29 +126,108 @@ if __name__ == '__main__':
         device = torch.accelerator.current_accelerator()
     else:
         device = torch.device('cpu')
-    
+
     model = model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters())
 
-    loss_fn = torch.nn.CrossEntropyLoss()
+    loss_fn = torch.nn.BCELoss()
 
     batch_converter = alphabet.get_batch_converter()
     collate_fn = partial(esm_collate_generator, esm_batch_converter=batch_converter)
 
     train_data = AlignedSequencesFromCSVDataset(train_path, id_col, seq_cols)
     train_dataloader = DataLoader(
-        train_data, batch_size=batch_size, shuffle=True, collate_fn=collate_fn
+        train_data, batch_size=batch_size, drop_last=True, shuffle=True, collate_fn=collate_fn
+    )
+    val_data = AlignedSequencesFromCSVDataset(val_path, id_col, seq_cols)
+    val_dataloader = DataLoader(
+        val_data, batch_size=batch_size, drop_last=True, shuffle=True, collate_fn=collate_fn
     )
 
+    acc_metric = torchmetrics.classification.BinaryAccuracy().to(device)
+    recall_metric = torchmetrics.classification.BinaryRecall().to(device)
+    precision_metric = torchmetrics.classification.BinaryPrecision().to(device)
+
+    # Training loop
+    step_idx = 0
+    logs = []
     for epoch_idx in range(epoch_num):
-        for tokens, labels in train_dataloader:
-            tokens = tokens.to(device)
-            labels = labels.to(device, dtype=torch.long)
-            pred = model(tokens)
+        # Train epoch
+        loss = 0
+        num_samples = 0
+        model.train()
+        with tqdm.trange(
+            len(train_dataloader), unit='batch', bar_format='{l_bar}{bar:10}{r_bar}'
+        ) as bar:
+            bar.set_description(f'epoch {epoch_idx}')
+            for input, target in train_dataloader:
+                input = input.to(device)
+                target = target.to(device)
+                output = model(input).squeeze()
 
-            loss = loss_fn(pred, labels)
+                step_loss = loss_fn(output, target)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+                optimizer.zero_grad()
+                step_loss.backward()
+                optimizer.step()
+
+                acc = acc_metric(output, target)
+                recall_metric(output, target)
+                precision_metric(output, target)
+
+                loss += step_loss * len(input)
+                num_samples += len(input)
+                if step_idx % log_interval == 0:
+                    logs.append(
+                        {
+                            'epoch_idx': epoch_idx,
+                            'step_idx': step_idx,
+                            'step_loss': step_loss.item(),
+                        }
+                    )
+                bar.set_postfix(loss=step_loss.item())
+
+                bar.update(1)
+                step_idx += 1
+
+        log = {'epoch_num': epoch_idx, 'step_idx': step_idx, 'loss': (loss / num_samples).item()}
+
+        acc = acc_metric.compute().item()
+        acc_metric.reset()
+        log['acc_train'] = acc
+
+        recall = acc_metric.compute().item()
+        recall_metric.reset()
+        log['recall_train'] = recall
+
+        precision = precision_metric.compute().item()
+        precision_metric.reset()
+        log['precision_train'] = precision
+
+        # Validation
+        outputs = []
+        model.eval()
+        with torch.no_grad():
+            for input, target in val_dataloader:
+                input = input.to(device)
+                target = target.to(device)
+                output = model(input).squeeze()
+
+                acc_metric(output, target)
+                recall_metric(output, target)
+                precision_metric(output, target)
+
+        acc = acc_metric.compute().item()
+        acc_metric.reset()
+        log['acc_val'] = acc
+
+        recall = acc_metric.compute().item()
+        recall_metric.reset()
+        log['recall_val'] = recall
+
+        precision = precision_metric.compute().item()
+        precision_metric.reset()
+        log['precision_val'] = precision
+
+        logs.append(log)
