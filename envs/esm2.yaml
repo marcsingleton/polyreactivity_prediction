@@ -1,0 +1,13 @@
+channels:
+  - defaults
+  - bioconda
+  - anaconda
+  - conda-forge
+dependencies:
+  - pip
+  - mlflow
+  - pytorch
+  - torchmetrics
+  - tqdm
+  - pip:
+    - fair-esm
