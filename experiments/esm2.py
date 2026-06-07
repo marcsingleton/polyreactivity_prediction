@@ -123,7 +123,7 @@ def train():
         acc_metric.reset()
         mlflow.log_metric('acc_train', acc, step=step_idx)
 
-        recall = acc_metric.compute().item()
+        recall = recall_metric.compute().item()
         recall_metric.reset()
         mlflow.log_metric('recall_train', recall, step=step_idx)
 
@@ -155,7 +155,7 @@ def train():
         acc_metric.reset()
         mlflow.log_metric('acc_val', acc, step=step_idx)
 
-        recall = acc_metric.compute().item()
+        recall = recall_metric.compute().item()
         recall_metric.reset()
         mlflow.log_metric('recall_val', recall, step=step_idx)
 
@@ -177,7 +177,7 @@ experiment_name = 'esm2_finetune_head'
 run_name = 'initial_test'
 esm2_trunk_name = 'esm2_t33_650M_UR50D'
 batch_size = 128
-epoch_num = 100
+epoch_num = 150
 lr = 0.001
 log_interval = 10
 
@@ -218,6 +218,7 @@ if __name__ == '__main__':
 
     mlflow.set_experiment(experiment_name)
     mlflow.enable_system_metrics_logging()
+    mlflow.set_system_metrics_sampling_interval(60)
 
     with mlflow.start_run(run_name=run_name):
         mlflow.set_tag('cluster_name', cluster_name)
