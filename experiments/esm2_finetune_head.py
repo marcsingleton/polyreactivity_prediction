@@ -142,3 +142,4 @@ if __name__ == '__main__':
         mlflow.pytorch.log_model(
             pytorch_model=model.classifier_head, name=f'{experiment_name}-final'
         )
+        mlflow.end_run()
