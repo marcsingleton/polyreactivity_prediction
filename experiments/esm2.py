@@ -10,32 +10,13 @@ import mlflow
 import torch
 import torch.nn as nn
 import torchmetrics
-import tqdm
-from torch.utils.data import Dataset, DataLoader
+
+from torch.utils.data import DataLoader
 
 import esm
 
-
-class AlignedSequencesFromCSVDataset(Dataset):
-    def __init__(self, path, id_col, seq_cols, sep=','):
-        data = []
-        with open(path) as file:
-            line = file.readline()
-            cols = line.rstrip('\n').split(sep)
-            col_to_idx = {col: idx for idx, col in enumerate(cols)}
-            for line in file:
-                fields = line.rstrip('\n').split(sep)
-                id = fields[col_to_idx[id_col]]
-                seq = [fields[col_to_idx[col]] for col in seq_cols]
-                seq = ''.join(seq)
-                data.append((id, seq))
-        self._data = data
-
-    def __len__(self):
-        return len(self._data)
-
-    def __getitem__(self, idx):
-        return self._data[idx]
+from src.esm2 import esm_collate_generator, train
+from src.utils import AlignedSequencesFromCSVDataset, TrainingMetrics
 
 
 class ESM2Classifier(nn.Module):
@@ -67,110 +48,6 @@ class ClassifierHead(nn.Module):
         return x
 
 
-def esm_collate_generator(samples, esm_batch_converter):
-    unaligned_samples = []
-    for id, seq in samples:
-        seq = seq.replace('-', '')
-        unaligned_samples.append((id, seq))
-    _, _, tokens = esm_batch_converter(unaligned_samples)
-    tokens = tokens
-
-    labels = torch.empty(len(samples))
-    for idx, (id, _) in enumerate(samples):
-        if id.split('|')[1] == 'high-poly':
-            labels[idx] = 1.0
-        else:
-            labels[idx] = 0.0
-
-    return tokens, labels
-
-
-def train():
-    step_idx = 0
-    for epoch_idx in range(epoch_num):
-        # Train epoch
-        model.train()
-        if fabric.global_rank == 0:
-            bar = tqdm.trange(
-                len(train_dataloader),
-                desc=f'epoch {epoch_idx}',
-                unit='batch',
-                bar_format='{l_bar}{bar:10}{r_bar}',
-            )
-        for input, target in train_dataloader:
-            output = model(input).squeeze()
-
-            step_loss = loss_fn(output, target)
-
-            optimizer.zero_grad()
-            fabric.backward(step_loss)
-            optimizer.step()
-
-            loss_metric(step_loss, len(input))
-            acc_metric(output, target)
-            recall_metric(output, target)
-            precision_metric(output, target)
-
-            if step_idx % log_interval == 0 and fabric.global_rank == 0:
-                mlflow.log_metric('step_loss', step_loss.item(), step=step_idx)
-            if fabric.global_rank == 0:
-                bar.set_postfix(loss=step_loss.item())
-                bar.update(1)
-
-            step_idx += 1
-        if fabric.global_rank == 0:
-            bar.close()
-
-        loss = loss_metric.compute().item()
-        loss_metric.reset()
-
-        acc = acc_metric.compute().item()
-        acc_metric.reset()
-
-        recall = recall_metric.compute().item()
-        recall_metric.reset()
-
-        precision = precision_metric.compute().item()
-        precision_metric.reset()
-
-        if fabric.global_rank == 0:
-            mlflow.log_metric('loss_train', loss, step=step_idx)
-            mlflow.log_metric('acc_train', acc, step=step_idx)
-            mlflow.log_metric('recall_train', recall, step=step_idx)
-            mlflow.log_metric('precision_train', precision, step=step_idx)
-
-        # Validation
-        model.eval()
-        with torch.no_grad():
-            for input, target in val_dataloader:
-                output = model(input).squeeze()
-
-                step_loss = loss_fn(output, target)
-
-                loss_metric(step_loss, len(input))
-                acc_metric(output, target)
-                recall_metric(output, target)
-                precision_metric(output, target)
-
-        loss = loss_metric.compute().item()
-        loss_metric.reset()
-
-        acc = acc_metric.compute().item()
-        acc_metric.reset()
-
-        recall = recall_metric.compute().item()
-        recall_metric.reset()
-
-        precision = precision_metric.compute().item()
-        precision_metric.reset()
-
-        if fabric.global_rank == 0:
-            mlflow.log_metric('loss_val', loss, step=step_idx)
-            mlflow.log_metric('acc_val', acc, step=step_idx)
-            mlflow.log_metric('recall_val', recall, step=step_idx)
-            mlflow.log_metric('precision_val', precision, step=step_idx)
-
-
 cluster_name = 'clusters_85'
 train_path = Path(f'data/processed/splits/{cluster_name}/train.csv')
 val_path = Path(f'data/processed/splits/{cluster_name}/val.csv')
@@ -187,6 +64,7 @@ batch_size = 256
 epoch_num = 150
 lr = 0.001
 log_interval = 10
+system_metrics_interval = 60
 
 if __name__ == '__main__':
     parser = ArgumentParser()
@@ -225,11 +103,17 @@ if __name__ == '__main__':
     acc_metric = torchmetrics.classification.BinaryAccuracy().to(fabric.device)
     recall_metric = torchmetrics.classification.BinaryRecall().to(fabric.device)
     precision_metric = torchmetrics.classification.BinaryPrecision().to(fabric.device)
+    metrics = TrainingMetrics(
+        loss=loss_metric,
+        acc=acc_metric,
+        recall=recall_metric,
+        precision=precision_metric,
+    )
 
     if fabric.global_rank == 0:
         mlflow.set_experiment(experiment_name)
         mlflow.enable_system_metrics_logging()
-        mlflow.set_system_metrics_sampling_interval(60)
+        mlflow.set_system_metrics_sampling_interval(system_metrics_interval)
         mlflow.start_run(run_name=run_name)
         mlflow.set_tag('cluster_name', cluster_name)
         mlflow.log_params(
@@ -242,7 +126,17 @@ if __name__ == '__main__':
             }
         )
 
-    train()
+    train(
+        model,
+        train_dataloader,
+        val_dataloader,
+        loss_fn,
+        optimizer,
+        fabric,
+        epoch_num,
+        metrics,
+        log_interval,
+    )
 
     if fabric.global_rank == 0:
         mlflow.pytorch.log_model(
