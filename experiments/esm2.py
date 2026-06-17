@@ -3,7 +3,9 @@
 import tomllib
 from functools import partial
 from pathlib import Path
+from argparse import ArgumentParser
 
+import lightning as L
 import mlflow
 import torch
 import torch.nn as nn
@@ -88,56 +90,59 @@ def train():
     for epoch_idx in range(epoch_num):
         # Train epoch
         model.train()
-        with tqdm.trange(
-            len(train_dataloader), unit='batch', bar_format='{l_bar}{bar:10}{r_bar}'
-        ) as bar:
-            bar.set_description(f'epoch {epoch_idx}')
-            for input, target in train_dataloader:
-                input = input.to(device)
-                target = target.to(device)
-                output = model(input).squeeze()
+        if fabric.global_rank == 0:
+            bar = tqdm.trange(
+                len(train_dataloader),
+                desc=f'epoch {epoch_idx}',
+                unit='batch',
+                bar_format='{l_bar}{bar:10}{r_bar}',
+            )
+        for input, target in train_dataloader:
+            output = model(input).squeeze()
 
-                step_loss = loss_fn(output, target)
+            step_loss = loss_fn(output, target)
 
-                optimizer.zero_grad()
-                step_loss.backward()
-                optimizer.step()
+            optimizer.zero_grad()
+            fabric.backward(step_loss)
+            optimizer.step()
 
-                loss_metric(step_loss, len(input))
-                acc_metric(output, target)
-                recall_metric(output, target)
-                precision_metric(output, target)
+            loss_metric(step_loss, len(input))
+            acc_metric(output, target)
+            recall_metric(output, target)
+            precision_metric(output, target)
 
-                if step_idx % log_interval == 0:
-                    mlflow.log_metric('step_loss', step_loss.item(), step=step_idx)
+            if step_idx % log_interval == 0 and fabric.global_rank == 0:
+                mlflow.log_metric('step_loss', step_loss.item(), step=step_idx)
+            if fabric.global_rank == 0:
                 bar.set_postfix(loss=step_loss.item())
-
                 bar.update(1)
-                step_idx += 1
+
+            step_idx += 1
+        if fabric.global_rank == 0:
+            bar.close()
 
         loss = loss_metric.compute().item()
         loss_metric.reset()
-        mlflow.log_metric('loss_train', loss, step=step_idx)
 
         acc = acc_metric.compute().item()
         acc_metric.reset()
-        mlflow.log_metric('acc_train', acc, step=step_idx)
 
         recall = recall_metric.compute().item()
         recall_metric.reset()
-        mlflow.log_metric('recall_train', recall, step=step_idx)
 
         precision = precision_metric.compute().item()
         precision_metric.reset()
-        mlflow.log_metric('precision_train', precision, step=step_idx)
+
+        if fabric.global_rank == 0:
+            mlflow.log_metric('loss_train', loss, step=step_idx)
+            mlflow.log_metric('acc_train', acc, step=step_idx)
+            mlflow.log_metric('recall_train', recall, step=step_idx)
+            mlflow.log_metric('precision_train', precision, step=step_idx)
 
         # Validation
-        outputs = []
         model.eval()
         with torch.no_grad():
             for input, target in val_dataloader:
-                input = input.to(device)
-                target = target.to(device)
                 output = model(input).squeeze()
 
                 step_loss = loss_fn(output, target)
@@ -149,19 +154,21 @@ def train():
 
         loss = loss_metric.compute().item()
         loss_metric.reset()
-        mlflow.log_metric('loss_val', loss, step=step_idx)
 
         acc = acc_metric.compute().item()
         acc_metric.reset()
-        mlflow.log_metric('acc_val', acc, step=step_idx)
 
         recall = recall_metric.compute().item()
         recall_metric.reset()
-        mlflow.log_metric('recall_val', recall, step=step_idx)
 
         precision = precision_metric.compute().item()
         precision_metric.reset()
-        mlflow.log_metric('precision_val', precision, step=step_idx)
+
+        if fabric.global_rank == 0:
+            mlflow.log_metric('loss_val', loss, step=step_idx)
+            mlflow.log_metric('acc_val', acc, step=step_idx)
+            mlflow.log_metric('recall_val', recall, step=step_idx)
+            mlflow.log_metric('precision_val', precision, step=step_idx)
 
 
 cluster_name = 'clusters_85'
@@ -176,24 +183,22 @@ seq_cols = config['constants']['imgt_columns']['all_polyreactivity']
 experiment_name = 'esm2_finetune_head'
 run_name = 'initial_test'
 esm2_trunk_name = 'esm2_t33_650M_UR50D'
-batch_size = 128
+batch_size = 256
 epoch_num = 150
 lr = 0.001
 log_interval = 10
 
 if __name__ == '__main__':
+    parser = ArgumentParser()
+    parser.add_argument('--num-nodes', type=int, default=1)
+    parser.add_argument('--devices', type=int, default=1)
+    args = parser.parse_args()
+
     esm2_trunk, alphabet = esm.pretrained.load_model_and_alphabet(esm2_trunk_name)
 
     model = ESM2Classifier(esm2_trunk)
     for param in model.esm2_trunk.parameters():
         param.requires_grad = False
-
-    if torch.accelerator.is_available():
-        device = torch.accelerator.current_accelerator()
-    else:
-        device = torch.device('cpu')
-
-    model = model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -211,28 +216,35 @@ if __name__ == '__main__':
         val_data, batch_size=batch_size, drop_last=True, shuffle=True, collate_fn=collate_fn
     )
 
-    loss_metric = torchmetrics.aggregation.MeanMetric().to(device)
-    acc_metric = torchmetrics.classification.BinaryAccuracy().to(device)
-    recall_metric = torchmetrics.classification.BinaryRecall().to(device)
-    precision_metric = torchmetrics.classification.BinaryPrecision().to(device)
+    fabric = L.Fabric(accelerator='gpu', num_nodes=args.num_nodes, devices=args.devices)
+    fabric.launch()
+    model, optimizer = fabric.setup(model, optimizer)
+    train_dataloader, val_dataloader = fabric.setup_dataloaders(train_dataloader, val_dataloader)
 
-    mlflow.set_experiment(experiment_name)
-    mlflow.enable_system_metrics_logging()
-    mlflow.set_system_metrics_sampling_interval(60)
+    loss_metric = torchmetrics.aggregation.MeanMetric().to(fabric.device)
+    acc_metric = torchmetrics.classification.BinaryAccuracy().to(fabric.device)
+    recall_metric = torchmetrics.classification.BinaryRecall().to(fabric.device)
+    precision_metric = torchmetrics.classification.BinaryPrecision().to(fabric.device)
 
-    with mlflow.start_run(run_name=run_name):
+    if fabric.global_rank == 0:
+        mlflow.set_experiment(experiment_name)
+        mlflow.enable_system_metrics_logging()
+        mlflow.set_system_metrics_sampling_interval(60)
+        mlflow.start_run(run_name=run_name)
         mlflow.set_tag('cluster_name', cluster_name)
         mlflow.log_params(
             {
                 'esm2_trunk_name': esm2_trunk_name,
                 'batch_size': batch_size,
+                'world_size': fabric.world_size,
                 'epoch_num': epoch_num,
                 'lr': lr,
             }
         )
 
-        train()
+    train()
 
+    if fabric.global_rank == 0:
         mlflow.pytorch.log_model(
             pytorch_model=model.classifier_head, name=f'{experiment_name}-final'
         )
