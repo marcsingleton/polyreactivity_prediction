@@ -58,8 +58,8 @@ with open('config.toml', 'rb') as file:
 seq_cols = config['constants']['imgt_columns']['all_polyreactivity']
 
 experiment_name = 'esm2_finetune_head'
-run_name = 'initial_test'
-esm2_trunk_name = 'esm2_t33_650M_UR50D'
+run_name = 'esm2_finetune_head_mean'
+esm2_trunk_name = 'esm2_t36_3B_UR50D'
 batch_size = 256
 epoch_num = 150
 lr = 0.001
